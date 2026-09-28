@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Peluca Blast</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Bangers&display=swap" rel="stylesheet">
+<style>
+  /* ===== PALETA (cámbiala aquí) ===== */
+  :root { --tinta:#2b1b3d; --rosa:#ff3d9a; --amarillo:#ffd23f; --cian:#3ddcff; --papel:#fff8e7; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body { margin:0; height:100%; overflow:hidden; background:var(--tinta); touch-action:none; user-select:none;
+    font-family:'Bangers','Comic Sans MS','Chalkboard SE',system-ui,sans-serif; color:var(--papel); }
+  canvas { position:fixed; inset:0; width:100%; height:100%; }
+  .hud { position:fixed; left:0; right:0; top:0; display:flex; justify-content:space-between; align-items:flex-start;
+    padding:calc(env(safe-area-inset-top,0px) + 10px) 16px 0; pointer-events:none; font-size:34px; letter-spacing:1px;
+    text-shadow:0 3px 0 var(--tinta), 0 0 8px var(--tinta); }
+  .hud small { display:block; font-size:16px; opacity:.85; }
+  #tiempo { font-size:52px; color:var(--amarillo); }
+  #aviso { position:fixed; left:0; right:0; bottom:calc(env(safe-area-inset-bottom,0px) + 22px); text-align:center; font-size:24px;
+    text-shadow:0 2px 0 var(--tinta); pointer-events:none; }
+  #cuenta { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; font-size:220px; color:var(--amarillo);
+    text-shadow:0 8px 0 var(--rosa), 0 0 24px var(--tinta); pointer-events:none; }
+  .pantalla { position:fixed; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px;
+    padding:24px; text-align:center; background:rgba(43,27,61,.88); }
+  .pantalla[hidden], #cuenta[hidden], #aviso[hidden] { display:none; }
+  h1 { margin:0; font-size:clamp(56px,16vw,110px); line-height:.9; color:var(--amarillo); text-shadow:0 6px 0 var(--rosa); transform:rotate(-3deg); }
+  p { margin:0; font-size:22px; max-width:22em; font-family:system-ui,sans-serif; font-weight:600; }
+  button { font:inherit; font-size:36px; padding:10px 34px; border:4px solid var(--tinta); border-radius:18px; color:var(--tinta);
+    background:var(--amarillo); box-shadow:0 7px 0 var(--rosa); cursor:pointer; }
+  button:active { transform:translateY(5px); box-shadow:0 2px 0 var(--rosa); }
+  #btnCam { position:fixed; right:12px; bottom:calc(env(safe-area-inset-bottom,0px) + 12px); font-size:22px; padding:4px 12px; box-shadow:0 4px 0 var(--rosa); }
+  .grande { font-size:96px; color:var(--amarillo); line-height:1; text-shadow:0 5px 0 var(--rosa); }
+  @media (prefers-reduced-motion:reduce){ h1{transform:none} }
+</style>
+</head>
+<body>
+<video id="video" playsinline muted style="display:none"></video>
+<canvas id="lienzo"></canvas>
+
+<div class="hud" id="hud" hidden>
+  <div><small>PUNTOS</small><span id="puntos">0</span></div>
+  <div id="tiempo">60</div>
+  <div style="text-align:right"><small>ROTOS</small><span id="rotos">0</span></div>
+</div>
+<div id="aviso" hidden>Apunta al careto de tu rival</div>
+<div id="cuenta" hidden></div>
+<button id="btnCam" hidden>🔄 cámara</button>
+
+<div class="pantalla" id="inicio">
+  <h1>PELUCA<br>BLAST</h1>
+  <p>Apunta con el móvil a tu rival. Toca la pantalla para lanzar bolas y destrozarle la peluca, las gafas, el bigote y el gorro.</p>
+  <button id="btnJugar">¡Jugar!</button>
+  <p id="estado" style="font-size:18px"></p>
+</div>
+
+<div class="pantalla" id="fin" hidden>
+  <h1 style="font-size:64px">¡TIEMPO!</h1>
+  <div class="grande" id="finPuntos">0</div>
+  <p id="finDetalle"></p>
+  <p>Comparad marcadores: gana quien más puntos tenga.</p>
+  <button id="btnOtra">Otra vez</button>
+</div>
+
+<script type="module">
+/* =====================================================================
+   PELUCA BLAST
+   1) MediaPipe detecta la cara (468 puntos) en el propio móvil.
+   2) Definimos un "sistema de coordenadas de la cara": origen en el punto
+      medio entre los ojos, unidad = ancho de la cara, y girado como la cabeza.
+      Así los complementos se dibujan siempre igual y se pegan a la cara.
+   3) Al tocar, sale una bola; al llegar, miramos si cae sobre un complemento.
+   ===================================================================== */
+
+// ---------- AJUSTES QUE PUEDES TOCAR ----------
+const DURACION = 60;        // segundos de partida
+const VIDA = { peluca:4, gafas:3, bigote:3, gorro:2 };  // impactos para romper cada complemento
+const PUNTOS_GOLPE = 10, PUNTOS_ROTO = 50;
+const REAPARECE = 3;        // segundos hasta que un complemento roto vuelve a aparecer
+const VUELO = 0.32;         // segundos que tarda la bola en llegar
+const COLORES_BOLA = ['#ff3d9a', '#ffd23f', '#3ddcff', '#7cff6b', '#b46bff'];
+
+const $ = id => document.getElementById(id);
+const video = $('video'), lienzo = $('lienzo'), ctx = lienzo.getContext('2d');
+let W = 0, H = 0, dpr = 1;
+function ajustar() {
+  dpr = Math.min(window.devicePixelRatio || 1, 2);
+  W = innerWidth; H = innerHeight;
+  lienzo.width = W * dpr; lienzo.height = H * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+addEventListener('resize', ajustar); ajustar();
+
+// ---------- COMPLEMENTOS ----------
+// Todo en coordenadas de cara: ojos en y=0, frente ≈ -0.5, nariz ≈ 0.35, boca ≈ 0.6.
+// hit = elipse donde cuenta el impacto {x,y,rx,ry}; pivote = punto sobre el que se tuerce al dañarse.
+const TINTA = '#2b1b3d';
+const COMPLEMENTOS = [
+  { id:'gorro', hit:{x:0,y:-1.35,rx:.3,ry:.45}, piv:[0,-1.05], lado:1,
+    dibujar(c) {
+      c.fillStyle = '#22c55e'; c.beginPath(); c.moveTo(-.28,-1.05); c.lineTo(.28,-1.05); c.lineTo(.03,-1.8); c.closePath(); c.fill(); c.stroke();
+      c.fillStyle = '#ff3d9a'; for (let i = 0; i < 3; i++) { c.beginPath(); c.arc(-.1 + i*.1, -1.2 - i*.16, .045, 0, 7); c.fill(); }
+      c.fillStyle = '#ffd23f'; c.beginPath(); c.arc(.03,-1.82,.09,0,7); c.fill(); c.stroke();
+    } },
+  { id:'gafas', hit:{x:0,y:0,rx:.62,ry:.3}, piv:[0,0], lado:-1,
+    dibujar(c) {
+      for (const s of [-1, 1]) {
+        c.fillStyle = 'rgba(61,220,255,.45)'; c.beginPath(); c.arc(s*.27,0,.25,0,7); c.fill(); c.strokeStyle='#ff2e63'; c.lineWidth=.055; c.stroke();
+        c.strokeStyle = TINTA; c.lineWidth=.02; c.beginPath(); c.arc(s*.27,0,.28,0,7); c.stroke();
+        c.fillStyle = '#ffd23f'; c.beginPath(); // estrella decorativa en la patilla
+        for (let k = 0; k < 10; k++) { const r = k % 2 ? .05 : .12, a = k*Math.PI/5; c.lineTo(s*.62 + Math.cos(a)*r, -.05 + Math.sin(a)*r); }
+        c.closePath(); c.fill(); c.stroke();
+      }
+      c.strokeStyle = '#ff2e63'; c.lineWidth = .055; c.beginPath(); c.moveTo(-.03,-.02); c.lineTo(.03,-.02); c.stroke();
+    } },
+  { id:'bigote', hit:{x:0,y:.5,rx:.58,ry:.2}, piv:[0,.5], lado:1,
+    dibujar(c) {
+      c.fillStyle = '#4a2a14';
+      for (const s of [-1, 1]) {
+        c.beginPath(); c.moveTo(0,.46);
+        c.bezierCurveTo(s*.18,.36, s*.42,.4, s*.52,.55); c.bezierCurveTo(s*.58,.66, s*.68,.55, s*.62,.44);
+        c.bezierCurveTo(s*.6,.68, s*.22,.62, 0,.57); c.closePath(); c.fill(); c.stroke();
+      }
+    } },
+  { id:'peluca', hit:{x:0,y:-.65,rx:.8,ry:.5}, piv:[0,-.55], lado:-1,
+    dibujar(c) {
+      const bolas = [[-.68,-.2,.22],[.7,-.15,.21],[-.6,-.45,.26],[.62,-.42,.27],[-.42,-.75,.3],[.4,-.78,.3],[-.1,-.92,.33],[.2,-.55,.3],[-.25,-.55,.32]];
+      const col = ['#ff3d9a','#ffd23f','#3ddcff','#b46bff','#7cff6b'];
+      bolas.forEach((b, i) => { c.fillStyle = col[i % col.length]; c.beginPath(); c.arc(b[0], b[1], b[2], 0, 7); c.fill(); c.stroke(); });
+    } },
+];
+COMPLEMENTOS.forEach(k => Object.assign(k, { max:VIDA[k.id], hp:VIDA[k.id], manchas:[], caida:0 }));
+
+// ---------- ESTADO DEL JUEGO ----------
+let estado = 'menu', tRestante = DURACION, puntos = 0, rotos = 0, aciertos = 0, fallos = 0;
+const bolas = [], particulas = [], textos = [], salpicaduras = [];
+let cara = null, vista = 0, sacudida = 0;   // "cara" = marco de referencia suavizado
+
+// ---------- CÁMARA + MEDIAPIPE ----------
+let landmarker = null, modoCam = 'environment', ultimoT = -1;
+async function iniciarCamara() {
+  if (video.srcObject) video.srcObject.getTracks().forEach(t => t.stop());
+  video.srcObject = await navigator.mediaDevices.getUserMedia({
+    video:{ facingMode:{ ideal:modoCam }, width:{ ideal:1280 }, height:{ ideal:720 } }, audio:false });
+  await video.play();
+}
+async function cargarModelo() {
+  const V = '0.10.14';
+  const { FaceLandmarker, FilesetResolver } = await import(`https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${V}/vision_bundle.mjs`);
+  const fileset = await FilesetResolver.forVisionTasks(`https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${V}/wasm`);
+  const opciones = delegado => ({ baseOptions:{ delegate:delegado,
+    modelAssetPath:'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task' },
+    runningMode:'VIDEO', numFaces:1 });
+  try { landmarker = await FaceLandmarker.createFromOptions(fileset, opciones('GPU')); }
+  catch { landmarker = await FaceLandmarker.createFromOptions(fileset, opciones('CPU')); }
+}
+
+// Transforma un punto del vídeo (0..1) a píxeles de pantalla (el vídeo se dibuja "cover")
+function aPantalla(p) {
+  const vw = video.videoWidth, vh = video.videoHeight, s = Math.max(W / vw, H / vh);
+  return { x:(W - vw*s)/2 + p.x*vw*s, y:(H - vh*s)/2 + p.y*vh*s };
+}
+const media = (L, a, b) => { const p = aPantalla(L[a]), q = aPantalla(L[b]); return { x:(p.x+q.x)/2, y:(p.y+q.y)/2 }; };
+
+function detectar() {
+  if (!landmarker || video.readyState < 2 || video.currentTime === ultimoT) return;
+  ultimoT = video.currentTime;
+  const r = landmarker.detectForVideo(video, performance.now());
+  const L = r.faceLandmarks && r.faceLandmarks[0];
+  if (!L) { if (cara && performance.now() - cara.visto > 300) cara = null; return; }
+  // Puntos clave: 33/133 y 263/362 = esquinas de los ojos; 234/454 = mejillas
+  const ojoA = media(L,33,133), ojoB = media(L,263,362), m1 = aPantalla(L[234]), m2 = aPantalla(L[454]);
+  const nuevo = { x:(ojoA.x+ojoB.x)/2, y:(ojoA.y+ojoB.y)/2, ang:Math.atan2(ojoB.y-ojoA.y, ojoB.x-ojoA.x),
+                  ancho:Math.hypot(m2.x-m1.x, m2.y-m1.y) * 1.05, visto:performance.now() };
+  if (!cara) cara = nuevo;
+  else { const k = .55; for (const p of ['x','y','ang','ancho']) cara[p] += (nuevo[p]-cara[p])*k; cara.visto = nuevo.visto; }
+}
+
+// ---------- DIBUJO ----------
+function dibujarVideo() {
+  const vw = video.videoWidth, vh = video.videoHeight;
+  if (!vw) { ctx.fillStyle = TINTA; ctx.fillRect(0,0,W,H); return; }
+  const s = Math.max(W/vw, H/vh);
+  ctx.drawImage(video, (W-vw*s)/2, (H-vh*s)/2, vw*s, vh*s);
+}
+function dibujarCara(dt) {
+  if (!cara) return;
+  ctx.save(); ctx.translate(cara.x, cara.y); ctx.rotate(cara.ang); ctx.scale(cara.ancho, cara.ancho);
+  ctx.lineWidth = .02; ctx.strokeStyle = TINTA; ctx.lineJoin = 'round';
+  for (const k of COMPLEMENTOS) {
+    if (k.hp <= 0) {                       // caída y reaparición
+      k.caida += dt; if (k.caida > REAPARECE && estado === 'jugando') { k.hp = k.max; k.manchas = []; k.caida = 0; continue; }
+      if (k.caida > 1.6) continue;
+    }
+    const dano = 1 - Math.max(k.hp, 0) / k.max;
+    ctx.save();
+    ctx.translate(k.piv[0], k.piv[1]);
+    if (k.hp <= 0) { ctx.translate(k.lado*k.caida*.4, k.caida*k.caida*2.2); ctx.rotate(k.lado*k.caida*3); ctx.globalAlpha = Math.max(0, 1 - k.caida/1.6); }
+    else { ctx.rotate(k.lado * dano * .3 + Math.sin(performance.now()/90) * (k.golpe > 0 ? .06 : 0)); ctx.scale(1 - dano*.15, 1 - dano*.15); }
+    ctx.translate(-k.piv[0], -k.piv[1]);
+    k.dibujar(ctx);
+    for (const m of k.manchas) {           // manchas de pintura pegadas al complemento
+      ctx.fillStyle = m.c; ctx.beginPath(); ctx.arc(m.x, m.y, m.r, 0, 7); ctx.fill();
+      for (let i = 0; i < 4; i++) { ctx.beginPath(); ctx.arc(m.x + Math.cos(i*1.7+m.r*40)*m.r*1.5, m.y + Math.sin(i*1.7+m.r*40)*m.r*1.5, m.r*.28, 0, 7); ctx.fill(); }
+    }
+    ctx.restore();
+    if (k.golpe > 0) k.golpe -= dt;
+  }
+  ctx.restore();
+}
+function dibujarBolas() {
+  for (const b of bolas) {
+    const p = Math.min(b.t / VUELO, 1);
+    const x = b.sx + (b.tx-b.sx)*p, y = b.sy + (b.ty-b.sy)*p - Math.sin(p*Math.PI) * H*.12;
+    const r = W*.09*(1 - .65*p);
+    const g = ctx.createRadialGradient(x - r*.3, y - r*.3, r*.1, x, y, r);
+    g.addColorStop(0, '#fff'); g.addColorStop(.25, b.c); g.addColorStop(1, b.c);
+    ctx.fillStyle = g; ctx.strokeStyle = TINTA; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.arc(x, y, r, 0, 7); ctx.fill(); ctx.stroke();
+  }
+}
+
+// ---------- LANZAR Y GOLPEAR ----------
+function lanzar(x, y) {
+  bolas.push({ sx:W/2, sy:H+W*.05, tx:x, ty:y, t:0, c:COLORES_BOLA[Math.random()*COLORES_BOLA.length | 0] });
+}
+function impacto(b) {
+  let dado = null;
+  if (cara) {                              // pasar el punto de pantalla a coordenadas de cara
+    const dx = b.tx - cara.x, dy = b.ty - cara.y, c = Math.cos(-cara.ang), s = Math.sin(-cara.ang);
+    const lx = (dx*c - dy*s) / cara.ancho, ly = (dx*s + dy*c) / cara.ancho;
+    for (const k of COMPLEMENTOS) {
+      if (k.hp <= 0) continue;
+      const h = k.hit;
+      if (((lx-h.x)/h.rx)**2 + ((ly-h.y)/h.ry)**2 <= 1) { dado = k; k.mancha = { x:lx, y:ly }; break; }
+    }
+  }
+  const n = dado ? 26 : 12;
+  for (let i = 0; i < n; i++) { const a = Math.random()*6.28, v = 120 + Math.random()*320;
+    particulas.push({ x:b.tx, y:b.ty, vx:Math.cos(a)*v, vy:Math.sin(a)*v, r:4+Math.random()*7, c:b.c, vida:.6 }); }
+  if (!dado) { fallos++; salpicaduras.push({ x:b.tx, y:b.ty, c:b.c, vida:1.2 }); return; }
+  aciertos++; dado.hp--; dado.golpe = .25; sacudida = 10;
+  dado.manchas.push({ x:dado.mancha.x, y:dado.mancha.y, r:.05 + Math.random()*.06, c:b.c });
+  let ganado = PUNTOS_GOLPE, msg = '+10';
+  if (dado.hp <= 0) { ganado += PUNTOS_ROTO; msg = '¡ROTO! +60'; rotos++; dado.caida = 0; }
+  puntos += ganado; textos.push({ x:b.tx, y:b.ty, t:msg, vida:1 });
+  navigator.vibrate && navigator.vibrate(dado.hp <= 0 ? 80 : 30);
+}
+lienzo.addEventListener('pointerdown', e => { if (estado === 'jugando') lanzar(e.clientX, e.clientY); });
+
+// ---------- BUCLE PRINCIPAL ----------
+let antes = performance.now();
+function bucle(ahora) {
+  const dt = Math.min((ahora - antes) / 1000, .05); antes = ahora;
+  detectar();
+  ctx.save();
+  if (sacudida > .5) { ctx.translate((Math.random()-.5)*sacudida, (Math.random()-.5)*sacudida); sacudida *= .85; }
+  dibujarVideo(); dibujarCara(dt); dibujarBolas();
+  for (let i = bolas.length-1; i >= 0; i--) { bolas[i].t += dt; if (bolas[i].t >= VUELO) { impacto(bolas[i]); bolas.splice(i,1); } }
+  for (let i = salpicaduras.length-1; i >= 0; i--) { const s = salpicaduras[i]; s.vida -= dt; if (s.vida <= 0) { salpicaduras.splice(i,1); continue; }
+    ctx.globalAlpha = Math.min(1, s.vida); ctx.fillStyle = s.c; ctx.beginPath(); ctx.arc(s.x, s.y, 26, 0, 7); ctx.fill(); }
+  for (let i = particulas.length-1; i >= 0; i--) { const p = particulas[i]; p.vida -= dt; if (p.vida <= 0) { particulas.splice(i,1); continue; }
+    p.x += p.vx*dt; p.y += p.vy*dt; p.vy += 600*dt; ctx.globalAlpha = p.vida*1.6; ctx.fillStyle = p.c; ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, 7); ctx.fill(); }
+  ctx.globalAlpha = 1; ctx.font = "bold 40px 'Bangers', system-ui"; ctx.textAlign = 'center'; ctx.lineWidth = 6; ctx.strokeStyle = TINTA;
+  for (let i = textos.length-1; i >= 0; i--) { const t = textos[i]; t.vida -= dt; if (t.vida <= 0) { textos.splice(i,1); continue; }
+    t.y -= 60*dt; ctx.globalAlpha = Math.min(1, t.vida*2); ctx.strokeText(t.t, t.x, t.y); ctx.fillStyle = '#ffd23f'; ctx.fillText(t.t, t.x, t.y); }
+  ctx.restore();
+
+  if (estado === 'jugando') {
+    tRestante -= dt;
+    $('puntos').textContent = puntos; $('rotos').textContent = rotos; $('tiempo').textContent = Math.max(0, Math.ceil(tRestante));
+    $('aviso').hidden = !!cara;
+    if (tRestante <= 0) terminar();
+  }
+  requestAnimationFrame(bucle);
+}
+
+// ---------- FLUJO: inicio → cuenta atrás → partida → fin ----------
+async function empezar() {
+  puntos = rotos = aciertos = fallos = 0; tRestante = DURACION;
+  COMPLEMENTOS.forEach(k => { k.hp = k.max; k.manchas = []; k.caida = 0; });
+  $('fin').hidden = true; $('hud').hidden = false; $('btnCam').hidden = false;
+  estado = 'cuenta'; const c = $('cuenta'); c.hidden = false;
+  for (const n of ['3','2','1','¡YA!']) { c.textContent = n; await new Promise(r => setTimeout(r, 800)); }
+  c.hidden = true; estado = 'jugando';
+}
+function terminar() {
+  estado = 'fin'; $('aviso').hidden = true;
+  const pre = aciertos + fallos ? Math.round(aciertos / (aciertos + fallos) * 100) : 0;
+  $('finPuntos').textContent = puntos;
+  $('finDetalle').textContent = `${rotos} complementos rotos · ${aciertos} aciertos · ${pre}% de puntería`;
+  $('fin').hidden = false;
+}
+$('btnJugar').addEventListener('click', async () => {
+  $('btnJugar').disabled = true; const st = $('estado');
+  try {
+    st.textContent = 'Pidiendo cámara…'; await iniciarCamara();
+    st.textContent = 'Cargando detector de caras…'; await cargarModelo();
+    $('inicio').hidden = true; empezar();
+  } catch (err) {
+    console.error(err); $('btnJugar').disabled = false;
+    st.textContent = 'No se pudo arrancar: ' + (location.protocol === 'file:' || !window.isSecureContext
+      ? 'la cámara necesita una dirección HTTPS (o localhost).' : 'permite la cámara e inténtalo de nuevo.');
+  }
+});
+$('btnOtra').addEventListener('click', empezar);
+$('btnCam').addEventListener('click', async e => { e.stopPropagation(); modoCam = modoCam === 'environment' ? 'user' : 'environment'; try { await iniciarCamara(); } catch {} });
+$('btnCam').addEventListener('pointerdown', e => e.stopPropagation());
+
+requestAnimationFrame(bucle);
+</script>
+</body>
+</html>
